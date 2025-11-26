@@ -2,17 +2,20 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Search, Plus, Upload, Moon, Sun, Menu, 
   Trash2, Edit2, Loader2, Cloud, CheckCircle2, AlertCircle,
-  Pin, Settings, Info
+  Pin, Settings, Lock, CloudCog
 } from 'lucide-react';
-import { LinkItem, Category, DEFAULT_CATEGORIES, INITIAL_LINKS } from './types';
+import { LinkItem, Category, DEFAULT_CATEGORIES, INITIAL_LINKS, WebDavConfig } from './types';
 import { parseBookmarks } from './services/bookmarkParser';
 import Icon from './components/Icon';
 import LinkModal from './components/LinkModal';
 import AuthModal from './components/AuthModal';
 import CategoryManagerModal from './components/CategoryManagerModal';
+import BackupModal from './components/BackupModal';
+import CategoryAuthModal from './components/CategoryAuthModal';
 
 const LOCAL_STORAGE_KEY = 'cloudnav_data_cache';
 const AUTH_KEY = 'cloudnav_auth_token';
+const WEBDAV_CONFIG_KEY = 'cloudnav_webdav_config';
 
 function App() {
   // --- State ---
@@ -23,10 +26,23 @@ function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   
+  // Category Security State
+  const [unlockedCategoryIds, setUnlockedCategoryIds] = useState<Set<string>>(new Set());
+
+  // WebDAV Config State
+  const [webDavConfig, setWebDavConfig] = useState<WebDavConfig>({
+      url: '',
+      username: '',
+      password: '',
+      enabled: false
+  });
+  
   // Modals
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [isCatManagerOpen, setIsCatManagerOpen] = useState(false);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [catAuthModalData, setCatAuthModalData] = useState<Category | null>(null);
   
   const [editingLink, setEditingLink] = useState<LinkItem | undefined>(undefined);
   
@@ -113,6 +129,14 @@ function App() {
     // Load Token
     const savedToken = localStorage.getItem(AUTH_KEY);
     if (savedToken) setAuthToken(savedToken);
+
+    // Load WebDAV Config
+    const savedWebDav = localStorage.getItem(WEBDAV_CONFIG_KEY);
+    if (savedWebDav) {
+        try {
+            setWebDavConfig(JSON.parse(savedWebDav));
+        } catch (e) {}
+    }
 
     // Initial Data Fetch
     const initData = async () => {
@@ -239,7 +263,23 @@ function App() {
       updateData(updated, categories);
   };
 
-  // --- Category Management ---
+  // --- Category Management & Security ---
+
+  const handleCategoryClick = (cat: Category) => {
+      // If category has password and is NOT unlocked
+      if (cat.password && !unlockedCategoryIds.has(cat.id)) {
+          setCatAuthModalData(cat);
+          setSidebarOpen(false);
+          return;
+      }
+      setSelectedCategory(cat.id);
+      setSidebarOpen(false);
+  };
+
+  const handleUnlockCategory = (catId: string) => {
+      setUnlockedCategoryIds(prev => new Set(prev).add(catId));
+      setSelectedCategory(catId);
+  };
 
   const handleUpdateCategories = (newCats: Category[]) => {
       if (!authToken) { setIsAuthOpen(true); return; }
@@ -261,15 +301,37 @@ function App() {
       updateData(newLinks, newCats);
   };
 
+  // --- WebDAV Config ---
+  const handleSaveWebDavConfig = (config: WebDavConfig) => {
+      setWebDavConfig(config);
+      localStorage.setItem(WEBDAV_CONFIG_KEY, JSON.stringify(config));
+  };
+
+  const handleRestoreBackup = (restoredLinks: LinkItem[], restoredCategories: Category[]) => {
+      updateData(restoredLinks, restoredCategories);
+      setIsBackupModalOpen(false);
+  };
+
   // --- Filtering & Memo ---
 
+  // Helper to check if a category is "Locked" (Has password AND not unlocked)
+  const isCategoryLocked = (catId: string) => {
+      const cat = categories.find(c => c.id === catId);
+      if (!cat || !cat.password) return false;
+      return !unlockedCategoryIds.has(catId);
+  };
+
   const pinnedLinks = useMemo(() => {
-      return links.filter(l => l.pinned);
-  }, [links]);
+      // Don't show pinned links if they belong to a locked category
+      return links.filter(l => l.pinned && !isCategoryLocked(l.categoryId));
+  }, [links, categories, unlockedCategoryIds]);
 
   const displayedLinks = useMemo(() => {
     let result = links;
     
+    // Security Filter: Always hide links from locked categories
+    result = result.filter(l => !isCategoryLocked(l.categoryId));
+
     // Search Filter
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -285,10 +347,8 @@ function App() {
       result = result.filter(l => l.categoryId === selectedCategory);
     }
     
-    // Sort: Pinned first? No, Pinned section is separate.
-    // Just sort by date desc for now
     return result.sort((a, b) => b.createdAt - a.createdAt);
-  }, [links, selectedCategory, searchQuery]);
+  }, [links, selectedCategory, searchQuery, categories, unlockedCategoryIds]);
 
 
   // --- Render Components ---
@@ -351,12 +411,30 @@ function App() {
     <div className="flex h-screen overflow-hidden text-slate-900 dark:text-slate-50">
       
       <AuthModal isOpen={isAuthOpen} onLogin={handleLogin} />
+      
+      <CategoryAuthModal 
+        isOpen={!!catAuthModalData}
+        category={catAuthModalData}
+        onClose={() => setCatAuthModalData(null)}
+        onUnlock={handleUnlockCategory}
+      />
+
       <CategoryManagerModal 
         isOpen={isCatManagerOpen} 
         onClose={() => setIsCatManagerOpen(false)}
         categories={categories}
         onUpdateCategories={handleUpdateCategories}
         onDeleteCategory={handleDeleteCategory}
+      />
+
+      <BackupModal
+        isOpen={isBackupModalOpen}
+        onClose={() => setIsBackupModalOpen(false)}
+        links={links}
+        categories={categories}
+        onRestore={handleRestoreBackup}
+        webDavConfig={webDavConfig}
+        onSaveWebDavConfig={handleSaveWebDavConfig}
       />
 
       {/* Sidebar Mobile Overlay */}
@@ -407,35 +485,49 @@ function App() {
                </button>
             </div>
 
-            {categories.map(cat => (
-              <button
-                key={cat.id}
-                onClick={() => { setSelectedCategory(cat.id); setSidebarOpen(false); }}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all group ${
-                  selectedCategory === cat.id 
-                    ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
-                    : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
-                }`}
-              >
-                <div className={`p-1.5 rounded-lg transition-colors ${selectedCategory === cat.id ? 'bg-blue-100 dark:bg-blue-800' : 'bg-slate-100 dark:bg-slate-800'}`}>
-                  <Icon name={cat.icon} size={16} />
-                </div>
-                <span className="truncate flex-1 text-left">{cat.name}</span>
-                {selectedCategory === cat.id && <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>}
-              </button>
-            ))}
+            {categories.map(cat => {
+                const isLocked = cat.password && !unlockedCategoryIds.has(cat.id);
+                return (
+                  <button
+                    key={cat.id}
+                    onClick={() => handleCategoryClick(cat)}
+                    className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all group ${
+                      selectedCategory === cat.id 
+                        ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium' 
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    <div className={`p-1.5 rounded-lg transition-colors flex items-center justify-center ${selectedCategory === cat.id ? 'bg-blue-100 dark:bg-blue-800' : 'bg-slate-100 dark:bg-slate-800'}`}>
+                      {isLocked ? <Lock size={16} className="text-amber-500" /> : <Icon name={cat.icon} size={16} />}
+                    </div>
+                    <span className="truncate flex-1 text-left">{cat.name}</span>
+                    {selectedCategory === cat.id && <div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div>}
+                  </button>
+                );
+            })}
         </div>
 
         {/* Footer Actions */}
         <div className="p-4 border-t border-slate-100 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 shrink-0">
             <input type="file" ref={fileInputRef} className="hidden" accept=".html" onChange={handleImport} />
-            <button 
-              onClick={() => { if(!authToken) setIsAuthOpen(true); else fileInputRef.current?.click(); }}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-600 transition-all mb-2"
-            >
-              <Upload size={16} />
-              <span>导入书签</span>
-            </button>
+            
+            <div className="grid grid-cols-2 gap-2 mb-2">
+                <button 
+                onClick={() => { if(!authToken) setIsAuthOpen(true); else fileInputRef.current?.click(); }}
+                className="flex items-center justify-center gap-1 px-2 py-2 text-xs text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-600 transition-all"
+                >
+                <Upload size={14} />
+                <span>导入</span>
+                </button>
+                
+                <button 
+                onClick={() => { if(!authToken) setIsAuthOpen(true); else setIsBackupModalOpen(true); }}
+                className="flex items-center justify-center gap-1 px-2 py-2 text-xs text-slate-600 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-600 transition-all"
+                >
+                <CloudCog size={14} />
+                <span>备份</span>
+                </button>
+            </div>
             
             <div className="flex items-center justify-between text-xs text-slate-400 px-2 mt-2">
                <div className="flex items-center gap-1">
@@ -523,16 +615,36 @@ function App() {
                  )}
 
                  <div className="flex items-center justify-between mb-4">
-                     <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                         {selectedCategory === 'all' ? (searchQuery ? '搜索结果' : '所有链接') : categories.find(c => c.id === selectedCategory)?.name}
+                     <h2 className="text-sm font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                         {selectedCategory === 'all' 
+                            ? (searchQuery ? '搜索结果' : '所有链接') 
+                            : (
+                                <>
+                                    {categories.find(c => c.id === selectedCategory)?.name}
+                                    {isCategoryLocked(selectedCategory) && <Lock size={14} className="text-amber-500" />}
+                                </>
+                            )
+                         }
                      </h2>
                  </div>
 
                  {displayedLinks.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 text-slate-400 border-2 border-dashed border-slate-200 dark:border-slate-700 rounded-xl">
-                        <Search size={40} className="opacity-30 mb-4" />
-                        <p>没有找到相关内容</p>
-                        <button onClick={() => setIsModalOpen(true)} className="mt-4 text-blue-500 hover:underline">添加一个?</button>
+                        {isCategoryLocked(selectedCategory) ? (
+                            <>
+                                <Lock size={40} className="text-amber-400 mb-4" />
+                                <p>该目录已锁定</p>
+                                <button onClick={() => setCatAuthModalData(categories.find(c => c.id === selectedCategory) || null)} className="mt-4 px-4 py-2 bg-amber-500 text-white rounded-lg">输入密码解锁</button>
+                            </>
+                        ) : (
+                            <>
+                                <Search size={40} className="opacity-30 mb-4" />
+                                <p>没有找到相关内容</p>
+                                {selectedCategory !== 'all' && (
+                                    <button onClick={() => setIsModalOpen(true)} className="mt-4 text-blue-500 hover:underline">添加一个?</button>
+                                )}
+                            </>
+                        )}
                     </div>
                  ) : (
                     <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-3">

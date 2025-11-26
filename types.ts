@@ -13,12 +13,20 @@ export interface Category {
   id: string;
   name: string;
   icon: string; // Lucide icon name or emoji
+  password?: string; // Optional password for category protection
 }
 
 export interface AppState {
   links: LinkItem[];
   categories: Category[];
   darkMode: boolean;
+}
+
+export interface WebDavConfig {
+  url: string;
+  username: string;
+  password: string;
+  enabled: boolean;
 }
 
 export const DEFAULT_CATEGORIES: Category[] = [
